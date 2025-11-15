@@ -1,0 +1,101 @@
+from selenium import webdriver
+from selenium.webdriver.common.by import By
+from selenium.webdriver.support.ui import WebDriverWait
+from selenium.webdriver.common.keys import Keys
+from selenium.webdriver.support import expected_conditions as EC
+from time import sleep
+from selenium.webdriver.common.action_chains import ActionChains
+
+# Initialize the webdriver (replace with your desired browser)
+driver = webdriver.Chrome()
+
+# Navigate to the webpage
+driver.get("#redacted")
+
+
+wait = WebDriverWait(driver, 10)
+
+# Find the only input box on the page
+input_box = driver.find_element(By.CSS_SELECTOR, 'input')
+
+# Clear existing input (optional)
+input_box.clear()
+
+# Enter the value
+input_box.send_keys("#redacted")
+
+# Press the Enter key
+input_box.send_keys(Keys.RETURN)
+
+wait = WebDriverWait(driver, 10)
+
+# Find the only password box on the page
+password_box = driver.find_element(By.CSS_SELECTOR, 'input[type="password"]')
+
+# Enter the password
+password_box.send_keys("your_password")
+
+# Press the Enter key
+input_box.send_keys(Keys.RETURN)
+
+driver.get("#redacted")
+
+WebDriverWait(driver, 10)
+# Find the only ag-Grid table on the page
+ag_grid = driver.find_element(By.CSS_SELECTOR, 'div[class*="ag-root"]')
+
+# Find the first row within the ag-Grid table
+first_row = ag_grid.find_element(By.CSS_SELECTOR, '.ag-row:first-child')
+
+for i in range(10):
+    sleep(120)
+    while True:
+        try:
+
+            first_row = ag_grid.find_element(By.CSS_SELECTOR, '.ag-row:first-child')
+
+            # Click the first row
+            first_row.click()
+
+            # Wait for the button with the specified aria-label to be clickable
+            button = WebDriverWait(driver, 10).until(
+                EC.element_to_be_clickable((By.XPATH, "//button[@aria-label='Resolve Callout']"))
+            )
+
+            WebDriverWait(driver, 5)
+
+            # Click the button
+            button.click()
+
+            WebDriverWait(driver, 5)
+
+          # Find the "Resolution Details" input box (adjust locator as needed)
+            resolution_details_box = driver.find_element(By.CSS_SELECTOR, "[formControlName='resolutionComment']")
+
+            # Enter the value "Other"
+            resolution_details_box.send_keys("Test")
+
+            WebDriverWait(driver, 5)
+
+            # Find the "Resolution Category" input box (adjust locator as needed)
+            resolution_category_box = driver.find_element(By.CSS_SELECTOR, "[formControlName='resolutionCategory']")
+
+            # Enter the value "Other"
+            resolution_category_box.send_keys("Other")
+
+            actions = ActionChains(driver)
+            actions.move_to_element_with_offset(driver.find_element(By.TAG_NAME, 'action-buttons'), 0, 15).click().perform()
+
+            sleep(5)
+
+        except Exception as e:
+            print("An error occurred:", e)
+            break  # Exit the loop on error
+
+except Exception as e:
+    print(f"Error: {e}")
+    print("Could not find or click the button with aria-label 'Resolve Callout'")
+
+finally:
+    # Close the browser
+    driver.quit()
