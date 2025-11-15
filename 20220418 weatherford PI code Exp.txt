@@ -1,0 +1,132 @@
+#adjust runtime based on previous runtime
+import pandas as pd
+import PIconnect as PI
+import pyodbc
+import os
+#from datetime import datetime
+import datetime
+import pytz #to get datetime in UTC
+
+os.chdir('')#redacted
+
+cnxn = pyodbc.connect('')#redacted
+cursor = cnxn.cursor()
+query = """select distinct API_No10, Well_Name, TAG_NAME, ATTRIBUTE_NAME from [ #redacted
+            where ATTRIBUTE_NAME in ('LastCycleTime','CurrentCycleTime')
+            and API_NO10 in ('4221935911')"""
+
+tag_df = pd.read_sql(query,cnxn)
+tag_list = tag_df["TAG_NAME"].tolist()
+print(f"Retrieved {len(tag_list)} tags for downhole gauges.")
+
+with PI.PIServer(server='#redacted') as server:
+    print(f"Connected to server: {server.server_name}")
+    points = server.search(tag_list)
+#    points = points[:5]  # limit to first 5 downhole gauge tags for testing purposes
+
+    point_df_list = []
+    for point in points:
+        point_df = (
+            point.recorded_values("t-4d", "*").to_frame().reset_index()
+        )
+        point_df.columns = ["TIMESTAMP", "VALUES"]
+        point_df["TAG_NAME"] = str(point.tag)
+        point_df_list.append(point_df)
+
+
+df = pd.concat(point_df_list, axis=0)
+#concat messes up index
+df = df.reset_index(drop=True)
+data_columns = ['VALUES']
+num_df = (df.drop(data_columns, axis=1).join(df[data_columns].apply(pd.to_numeric, errors='coerce')))
+combined_df = num_df[num_df[data_columns].notnull().all(axis=1)]
+combined_df = combined_df.merge(tag_df, on="TAG_NAME")
+combined_df = combined_df.sort_values(by = ['API_No10','TIMESTAMP'])
+combined_df['TIMESTAMP'] = pd.to_datetime(combined_df['TIMESTAMP'],utc=True)
+combined_df["PrevAPI"] = combined_df["API_No10"].shift(-1)
+combined_df["NextAPI"] = combined_df["API_No10"].shift(+1)
+CurCycle_df = combined_df[combined_df['ATTRIBUTE_NAME']=='CurrentCycleTime']
+CurCycle_df["PrevCycleTime"] = CurCycle_df.groupby('API_No10')["VALUES"].shift(-1)
+CurCycle_df.reset_index(inplace=True)
+
+def newrowcycle(row):
+    if row['VALUES'] == 0 and row['PrevCycleTime'] > 0 and row['API_No10'] == row['NextAPI'] and row['API_No10'] == row['PrevAPI']:
+        val = 1
+    else:
+        val = 0
+    return val
+
+CurCycle_df["NewCycle"] = CurCycle_df.apply(newrowcycle,axis=1)
+CurCycle_df = CurCycle_df[CurCycle_df['NewCycle'] == 1].reset_index(drop=True)
+
+combined_df = combined_df[combined_df['ATTRIBUTE_NAME']=='LastCycleTime'].reset_index(drop=True)
+combined_df['LastCycleTime'] = combined_df['VALUES']
+
+combined_df_last = combined_df.groupby('API_No10').tail(15)
+StartValue_df = combined_df_last.groupby('API_No10')['VALUES'].quantile(0.5).round(0)
+
+combined_df = pd.concat([CurCycle_df, combined_df])
+
+in_value_df = pd.read_csv ('entered_cycle_runtimes.csv',header=0, dtype=str)
+in_value_df ['TIMESTAMP'] = pd.to_datetime(in_value_df['TIMESTAMP'],utc=True)
+df2 = pd.concat([in_value_df, combined_df])
+df2 = df2.reset_index(drop=True)
+df2 = df2.sort_values(by=['API_No10','TIMESTAMP'])
+df2["index"] = df2.groupby('API_No10')['index'].transform(lambda x: x.ffill())
+df_CycleTime = df2.groupby('index')['LastCycleTime'].first().to_frame('CycleTime')
+df2 = df2.merge(df_CycleTime,on='index')
+
+df2["MaxCycleRuntime"] = df2.groupby('API_No10')['MaxCycleRuntime'].transform(lambda x: x.ffill())
+
+df2 = df2[df2['NewCycle'] == 1]
+
+
+data_columns = ['MaxCycleRuntime']
+num_df = (df2.drop(data_columns, axis=1).join(df2[data_columns].apply(pd.to_numeric, errors='coerce')))
+df2 = num_df[num_df[data_columns].notnull().all(axis=1)]
+
+def cycleshut(row):
+    if row['MaxCycleRuntime'] == row['CycleTime']:
+        val = 'limit'
+    elif row['MaxCycleRuntime'] > row['CycleTime']:
+        val = 'under'
+ #   elif row['MaxCycleRuntime'] < row['CycleTime']:
+ #       val = 'over'
+    else:
+        val = 'error'
+    return val
+
+df2["CycleShut"] = df2.apply(cycleshut,axis=1)
+df_trim = df2[df2['CycleShut'] !='error'].groupby('API_No10').tail(10)
+
+Limit_df = df_trim[df_trim['CycleShut'] =='limit'].groupby('API_No10')['CycleShut'].count().to_frame('Limit')
+Under_df = df_trim[df_trim['CycleShut'] =='under'].groupby('API_No10')['CycleShut'].count().to_frame('Under')
+MaxCycle_df = df_trim.groupby('API_No10')['API_No10','MaxCycleRuntime'].tail(1)
+Total_df = df_trim.groupby('API_No10')['CycleShut'].count().to_frame('Total')
+Last_df = df_trim.groupby('API_No10')['API_No10','CycleShut'].tail(1)
+FirstTime_df = df_trim.groupby('API_No10')['API_No10','TIMESTAMP'].head(1).rename(columns={'TIMESTAMP':'FirstTime'})
+LastTime_df = df_trim.groupby('API_No10')['API_No10','TIMESTAMP'].tail(1).rename(columns={'TIMESTAMP':'LastTime'})
+
+Stats_df = Total_df.merge(Under_df, how='left', on='API_No10').merge(Limit_df, how='left', on='API_No10').merge(MaxCycle_df, how='left', on='API_No10')
+Stats_df = Stats_df.merge(Last_df, how='left', on='API_No10').merge(FirstTime_df, how='left', on='API_No10').merge(LastTime_df, how='left', on='API_No10')
+
+utc_now = pytz.utc.localize(datetime.datetime.utcnow())
+
+def action(row):
+    if row['Limit'] / row['Total'] >= 0.8 and (utc_now - row['LastTime']).seconds < 6*60*60 and row['Total']==10:
+        val = row['MaxCycleRuntime'] * 1.025
+    elif row['Limit'] / row['Total'] < 0.9 and row['CycleShut'] != 'limit' and (utc_now - row['LastTime']).seconds < 6*60*60 and row['Total']==10:
+        val = row['MaxCycleRuntime'] / 1.025
+    elif row['Limit'] / row['Total'] < 0.8 and row['CycleShut'] == 'limit':
+        val = row['MaxCycleRuntime']
+    else:
+        val = 0
+    return val
+
+Stats_df["Action"] = Stats_df.apply(action,axis=1).round(0)
+
+print(Stats_df)
+
+#SetValue_df.to_csv("SetValue.csv", header=True)
+
+#df2.to_csv("All_Wells.csv", header=True)
